@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-PDF 轉 EPUB 轉換工具
+PDF 轉 EPUB / KEPUB 轉換工具
 
 使用 PyMuPDF 解析 PDF 文字區塊，清理頁首/頁尾/頁碼，
-依字體大小辨識標題層級，再以 ebooklib 封裝成 EPUB。
+依字體大小辨識標題層級，再以 ebooklib 封裝成 EPUB，
+最後透過 Calibre ebook-convert 轉成 Kobo 友善的 KEPUB。
 """
 
 from __future__ import annotations
@@ -11,6 +12,10 @@ from __future__ import annotations
 import argparse
 import html
 import re
+import shutil
+import subprocess
+import zipfile
+from xml.etree import ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -433,12 +438,193 @@ def build_epub(
 
 
 # ---------------------------------------------------------------------------
+# Calibre KEPUB 轉換
+# ---------------------------------------------------------------------------
+
+
+def _resolve_ebook_convert() -> str:
+    """尋找 Calibre 的 ebook-convert 可執行檔。"""
+    found = shutil.which("ebook-convert")
+    if found:
+        return found
+
+    # macOS 常見安裝路徑（App bundle 未加入 PATH 時）
+    mac_candidates = (
+        "/Applications/calibre.app/Contents/MacOS/ebook-convert",
+        "/usr/local/bin/ebook-convert",
+        "/opt/homebrew/bin/ebook-convert",
+    )
+    for candidate in mac_candidates:
+        if Path(candidate).is_file():
+            return candidate
+
+    raise FileNotFoundError(
+        "找不到 ebook-convert。請安裝 Calibre，並確保 CLI 可在終端機執行 "
+        "（macOS 可將 /Applications/calibre.app/Contents/MacOS 加入 PATH）。"
+    )
+
+
+def convert_epub_to_kepub(epub_path: Path) -> Path:
+    """
+    使用 Calibre ebook-convert 將 EPUB 轉成 Kobo KEPUB。
+
+    經 Calibre 轉換管線可重整 HTML/CSS 結構，產出 XXXX.kepub.epub，
+    降低 Kobo 韌體解析不良標記而卡死的風險。
+    """
+    if not epub_path.is_file():
+        raise FileNotFoundError(f"找不到 EPUB 檔案：{epub_path}")
+
+    ebook_convert = _resolve_ebook_convert()
+    kepub_path = epub_path.with_name(f"{epub_path.stem}.kepub.epub")
+
+    cmd = [
+        ebook_convert,
+        str(epub_path),
+        str(kepub_path),
+        "--output-profile=kobo",
+        "--epub-version=3",
+        "--flow-size=0",
+        "--no-svg-cover",
+        "--pretty-print",
+    ]
+
+    print(f"      執行：{' '.join(cmd)}")
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            f"ebook-convert 轉換失敗（結束碼 {result.returncode}）"
+            + (f"：\n{detail}" if detail else "")
+        )
+
+    if not kepub_path.is_file():
+        raise RuntimeError(f"ebook-convert 已結束，但找不到輸出檔：{kepub_path}")
+
+    return kepub_path
+
+
+# ---------------------------------------------------------------------------
+# 作者資料夾歸檔
+# ---------------------------------------------------------------------------
+
+
+INVALID_FILENAME_CHARS = r'[<>:"/\\|?*\x00-\x1F]'
+
+
+def _normalize_author_name(author: str) -> str:
+    """
+    作者名稱正規化：
+    - 清理空白
+    - 統一首字母大寫（忽略原始大小寫）
+    """
+    cleaned = _normalize_whitespace(author)
+    if not cleaned:
+        return "Unknown"
+    return cleaned.title()
+
+
+def _safe_folder_name(name: str) -> str:
+    """移除不適合作為資料夾名稱的字元。"""
+    safe = re.sub(INVALID_FILENAME_CHARS, "_", name).strip(" .")
+    return safe or "Unknown"
+
+
+def _extract_author_from_filename(path: Path) -> str | None:
+    """
+    從檔名推測作者，例如：
+    - Author - Title.epub
+    - Author_ Title.epub
+    """
+    stem = path.stem
+    for sep in (" - ", "_-_", "_", "-"):
+        if sep in stem:
+            candidate = stem.split(sep, 1)[0].strip()
+            if len(candidate) >= 2:
+                return candidate
+    return None
+
+
+def _extract_author_from_epub_metadata(epub_path: Path) -> str | None:
+    """
+    從 EPUB/KEPUB 的 OPF metadata 讀取作者（dc:creator）。
+    透過 zip + XML 解析，避免依賴特定 reader 實作。
+    """
+    try:
+        with zipfile.ZipFile(epub_path, "r") as archive:
+            container_xml = archive.read("META-INF/container.xml")
+            container_root = ET.fromstring(container_xml)
+            rootfile = container_root.find(".//{*}rootfile")
+            if rootfile is None:
+                return None
+
+            opf_path = rootfile.attrib.get("full-path", "").strip()
+            if not opf_path:
+                return None
+
+            opf_xml = archive.read(opf_path)
+            opf_root = ET.fromstring(opf_xml)
+            creators = opf_root.findall(".//{*}metadata/{*}creator")
+            for creator in creators:
+                if creator.text and creator.text.strip():
+                    return creator.text.strip()
+    except (KeyError, ET.ParseError, OSError, zipfile.BadZipFile):
+        return None
+
+    return None
+
+
+def detect_author_name(epub_path: Path) -> str:
+    """
+    依序由 metadata、檔名抓作者；若都失敗，回傳 Unknown。
+    """
+    author_from_meta = _extract_author_from_epub_metadata(epub_path)
+    if author_from_meta:
+        return _normalize_author_name(author_from_meta)
+
+    author_from_name = _extract_author_from_filename(epub_path)
+    if author_from_name:
+        return _normalize_author_name(author_from_name)
+
+    return "Unknown"
+
+
+def copy_kepub_to_author_folder(kepub_path: Path, base_dir: Path | None = None) -> Path:
+    """
+    將 .kepub.epub 複製到作者資料夾。
+    預設建立在 kepub 檔案同層目錄下。
+    """
+    if not kepub_path.is_file():
+        raise FileNotFoundError(f"找不到 KEPUB 檔案：{kepub_path}")
+
+    target_base = base_dir or kepub_path.parent
+    author_name = detect_author_name(kepub_path)
+    author_folder = target_base / _safe_folder_name(author_name)
+    author_folder.mkdir(parents=True, exist_ok=True)
+
+    target_file = author_folder / kepub_path.name
+    shutil.copy2(kepub_path, target_file)
+    return target_file
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
 
-def convert_pdf_to_epub(pdf_path: Path, epub_path: Path, config: ConversionConfig | None = None) -> None:
-    """將 PDF 轉換為 EPUB 的完整流程。"""
+def convert_pdf_to_epub(
+    pdf_path: Path,
+    epub_path: Path,
+    config: ConversionConfig | None = None,
+    *,
+    skip_kepub: bool = False,
+) -> None:
+    """將 PDF 轉換為 EPUB，並預設再轉成 KEPUB。"""
     config = config or ConversionConfig()
 
     if not pdf_path.is_file():
@@ -448,20 +634,21 @@ def convert_pdf_to_epub(pdf_path: Path, epub_path: Path, config: ConversionConfi
         config.title = pdf_path.stem
 
     cover_path = epub_path.parent / "cover.png"
+    total_steps = 4 if skip_kepub else 6
 
     try:
-        print(f"[1/4] 提取封面：{pdf_path} 第 1 頁")
+        print(f"[1/{total_steps}] 提取封面：{pdf_path} 第 1 頁")
         extract_cover_image(pdf_path, cover_path)
         if cover_path.is_file():
             print(f"      已儲存封面：{cover_path}")
         else:
             print("      PDF 無頁面，略過封面")
 
-        print(f"[2/4] 解析 PDF 內文：{pdf_path}")
+        print(f"[2/{total_steps}] 解析 PDF 內文：{pdf_path}")
         raw_blocks = extract_blocks_from_pdf(pdf_path)
         print(f"      讀取 {len(raw_blocks)} 個文字區塊（已跳過封面頁）")
 
-        print("[3/4] 清理結構並辨識標題")
+        print(f"[3/{total_steps}] 清理結構並辨識標題")
         structured_blocks = clean_and_structure_blocks(raw_blocks, pdf_path, config)
         heading_count = sum(1 for block in structured_blocks if block.is_heading)
         print(f"      保留 {len(structured_blocks)} 個區塊，其中標題 {heading_count} 個")
@@ -469,8 +656,21 @@ def convert_pdf_to_epub(pdf_path: Path, epub_path: Path, config: ConversionConfi
         if not structured_blocks:
             raise ValueError("未從 PDF 提取到可用文字，無法建立 EPUB")
 
-        print(f"[4/4] 封裝 EPUB：{epub_path}")
+        print(f"[4/{total_steps}] 封裝 EPUB：{epub_path}")
         build_epub(structured_blocks, epub_path, config, cover_path=cover_path)
+        print(f"      已產生：{epub_path}")
+
+        if skip_kepub:
+            print("轉換完成（已略過 KEPUB）。")
+            return
+
+        print(f"[5/{total_steps}] 以 Calibre 轉成 KEPUB")
+        kepub_path = convert_epub_to_kepub(epub_path)
+        print(f"      已產生：{kepub_path}")
+
+        print(f"[6/{total_steps}] 依作者自動歸檔 KEPUB")
+        copied_path = copy_kepub_to_author_folder(kepub_path)
+        print(f"      已複製至：{copied_path}")
         print("轉換完成。")
     finally:
         if cover_path.is_file():
@@ -479,7 +679,7 @@ def convert_pdf_to_epub(pdf_path: Path, epub_path: Path, config: ConversionConfi
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="將 PDF 檔案轉換為 EPUB 電子書（PyMuPDF + ebooklib）",
+        description="將 PDF 轉為 EPUB，並以 Calibre 再轉成 Kobo KEPUB",
     )
     parser.add_argument("input_pdf", type=Path, help="輸入 PDF 檔案路徑")
     parser.add_argument("output_epub", type=Path, help="輸出 EPUB 檔案路徑")
@@ -498,6 +698,11 @@ def parse_args() -> argparse.Namespace:
         default=0.08,
         help="頁尾區域高度比例（0~1，預設 0.08）",
     )
+    parser.add_argument(
+        "--skip-kepub",
+        action="store_true",
+        help="只輸出 EPUB，不呼叫 ebook-convert 轉成 KEPUB",
+    )
     return parser.parse_args()
 
 
@@ -512,7 +717,12 @@ def main() -> None:
         footer_ratio=args.footer_ratio,
     )
 
-    convert_pdf_to_epub(args.input_pdf, args.output_epub, config)
+    convert_pdf_to_epub(
+        args.input_pdf,
+        args.output_epub,
+        config,
+        skip_kepub=args.skip_kepub,
+    )
 
 
 if __name__ == "__main__":

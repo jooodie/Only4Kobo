@@ -1,8 +1,8 @@
-# PDF 轉 EPUB 工具
+# PDF 轉 EPUB / KEPUB 工具
 
-將 PDF 電子書轉換為 EPUB 格式，方便匯入 Kobo 等電子閱讀器閱讀。
+將 PDF 電子書轉換為 EPUB，並自動再轉為 Kobo 較穩定的 KEPUB 格式。
 
-本工具使用 [PyMuPDF](https://pymupdf.readthedocs.io/) 解析 PDF 文字區塊，自動清理頁首、頁尾與頁碼，依字體大小辨識標題層級，再以 [EbookLib](https://github.com/aerkalov/ebooklib) 封裝成 EPUB。
+本工具使用 [PyMuPDF](https://pymupdf.readthedocs.io/) 解析 PDF 文字區塊，自動清理頁首、頁尾與頁碼，依字體大小辨識標題層級，再以 [EbookLib](https://github.com/aerkalov/ebooklib) 封裝成 EPUB，最後透過 Calibre CLI 轉成 KEPUB。
 
 ## 功能特色
 
@@ -12,13 +12,14 @@
 - 合併相鄰段落，還原閱讀流暢度
 - 依 h1 標題或固定區塊數自動分章
 - 支援自訂書名、作者、語言等中繼資料
+- 自動呼叫 `ebook-convert` 產生 `.kepub.epub`
+- 自動從 metadata/檔名抓作者並歸檔（大小寫統一，找不到則 `Unknown`）
 
 ## 環境需求
 
 - Python 3.10 以上
-- 僅需以下兩個 Python 套件：
-  - `PyMuPDF` — PDF 解析與封面渲染
-  - `EbookLib` — EPUB 封裝
+- Calibre（需可在終端執行 `ebook-convert`）
+- Python 套件（見 `requirements.txt`）
 
 ## 安裝
 
@@ -30,6 +31,26 @@ python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 
 pip install -r requirements.txt
+```
+
+若 `ebook-convert` 指令不存在，請先安裝 Calibre，並確認下列指令可執行：
+
+```bash
+ebook-convert --version
+```
+
+## 使用流程（建議照此順序）
+
+1. 進入專案資料夾
+2. 啟用虛擬環境
+3. 執行轉換指令
+4. 取得 `*.epub` 與 `*.kepub.epub`
+5. 到作者資料夾取檔（找不到作者時在 `Unknown/`）
+
+```bash
+cd /Users/jodie/Desktop/Jooo/For_Kobo
+source .venv/bin/activate
+python pdf_to_epub.py "輸入檔.pdf" "輸出檔.epub"
 ```
 
 ## 基本用法
@@ -44,7 +65,7 @@ python pdf_to_epub.py <輸入PDF> <輸出EPUB>
 python pdf_to_epub.py 快思慢想.pdf 快思慢想.epub
 ```
 
-轉換完成後，將 `.epub` 檔案傳到 Kobo 閱讀器即可。
+轉換完成後，建議將 `.kepub.epub` 傳到 Kobo 閱讀器。
 
 ## 命令列參數
 
@@ -57,6 +78,7 @@ python pdf_to_epub.py 快思慢想.pdf 快思慢想.epub
 | `--language` | 語言代碼（如 `zh`、`en`） | `zh` |
 | `--header-ratio` | 頁首區域高度比例（0～1） | `0.08` |
 | `--footer-ratio` | 頁尾區域高度比例（0～1） | `0.08` |
+| `--skip-kepub` | 只輸出 EPUB，不轉 KEPUB | 關閉 |
 
 ### 進階範例
 
@@ -75,13 +97,21 @@ python pdf_to_epub.py book.pdf book.epub --header-ratio 0.12 --footer-ratio 0.10
 
 ## 轉換流程
 
-執行時會依序完成以下四個步驟：
+預設會依序完成以下六個步驟：
 
 ```
-[1/4] 提取封面：將 PDF 第 1 頁渲染為封面圖片
-[2/4] 解析 PDF 內文：讀取文字區塊（跳過封面頁）
-[3/4] 清理結構並辨識標題：過濾頁首/頁尾、分類標題、合併段落
-[4/4] 封裝 EPUB：產生含封面、目錄、章節的 EPUB 檔案
+[1/6] 提取封面：將 PDF 第 1 頁渲染為封面圖片
+[2/6] 解析 PDF 內文：讀取文字區塊（跳過封面頁）
+[3/6] 清理結構並辨識標題：過濾頁首/頁尾、分類標題、合併段落
+[4/6] 封裝 EPUB：產生含封面、目錄、章節的 EPUB 檔案
+[5/6] Calibre 轉換：以 ebook-convert 產生 `.kepub.epub`
+[6/6] 作者歸檔：依作者建立資料夾並複製 `.kepub.epub`
+```
+
+若只想輸出 EPUB，可加上：
+
+```bash
+python pdf_to_epub.py book.pdf book.epub --skip-kepub
 ```
 
 ## 適用與限制
