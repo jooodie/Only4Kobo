@@ -1,4 +1,4 @@
-# PDF 轉 EPUB / KEPUB 工具
+# Only4Kobo
 
 將 PDF、EPUB 或 Word（.doc/.docx）轉為 Kobo 閱讀器友善的 `.kepub.epub` 格式。
 
@@ -26,8 +26,8 @@
 ## 安裝
 
 ```bash
-git clone https://github.com/jooodie/pdf2epub.git
-cd pdf2epub
+git clone https://github.com/jooodie/pdf2epub.git Only4Kobo
+cd Only4Kobo
 
 python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -59,9 +59,9 @@ ebook-convert --version
 5. 到作者資料夾取檔（找不到作者時在 `Unknown/`）
 
 ```bash
-cd /Users/jodie/Desktop/Jooo/For_Kobo
+cd Only4Kobo
 source .venv/bin/activate
-python pdf_to_epub.py "輸入檔.pdf" "輸出檔.epub"
+python only4kobo.py "輸入檔.pdf" "輸出檔.epub"
 ```
 
 檔名有空格時請用半形引號 `"` 包住（勿用彎引號 `“` `”` 或 `「」`）。
@@ -70,26 +70,26 @@ python pdf_to_epub.py "輸入檔.pdf" "輸出檔.epub"
 
 ```bash
 # PDF → EPUB → book.kepub.epub
-python pdf_to_epub.py <輸入PDF> <輸出EPUB>
+python only4kobo.py <輸入PDF> <輸出EPUB>
 
 # EPUB 直通
-python pdf_to_epub.py <輸入EPUB>
+python only4kobo.py <輸入EPUB>
 
 # Word → EPUB → book.kepub.epub
-python pdf_to_epub.py <輸入Word.docx>
+python only4kobo.py <輸入Word.docx>
 
 # 已是 .kepub.epub → 略過
-python pdf_to_epub.py book.kepub.epub
+python only4kobo.py book.kepub.epub
 ```
 
 ### 範例
 
 ```bash
-python pdf_to_epub.py 快思慢想.pdf 快思慢想.epub
+python only4kobo.py 快思慢想.pdf 快思慢想.epub
 # → 快思慢想.epub
 # → 快思慢想.kepub.epub
 
-python pdf_to_epub.py report.docx
+python only4kobo.py report.docx
 # → report.epub
 # → report.kepub.epub
 ```
@@ -112,7 +112,7 @@ python pdf_to_epub.py report.docx
 ### 進階範例
 
 ```bash
-python pdf_to_epub.py book.pdf book.epub \
+python only4kobo.py book.pdf book.epub \
   --title "快思慢想" \
   --author "丹尼爾·卡尼曼" \
   --language zh
@@ -121,7 +121,7 @@ python pdf_to_epub.py book.pdf book.epub \
 若 PDF 的頁首或頁尾較高，可調整比例以改善過濾效果：
 
 ```bash
-python pdf_to_epub.py book.pdf book.epub --header-ratio 0.12 --footer-ratio 0.10
+python only4kobo.py book.pdf book.epub --header-ratio 0.12 --footer-ratio 0.10
 ```
 
 ## 轉換流程
@@ -145,6 +145,8 @@ python pdf_to_epub.py book.pdf book.epub --header-ratio 0.12 --footer-ratio 0.10
 [3/3] 作者歸檔：依作者建立資料夾並複製 `.kepub.epub`
 ```
 
+### EPUB 輸入（兩步）
+
 ```
 [1/2] kepubify 轉換：產生 `book.kepub.epub`
 [2/2] 作者歸檔：依作者建立資料夾並複製 `.kepub.epub`
@@ -153,7 +155,7 @@ python pdf_to_epub.py book.pdf book.epub --header-ratio 0.12 --footer-ratio 0.10
 若只想輸出 EPUB（不轉 KEPUB），PDF 輸入時可加上：
 
 ```bash
-python pdf_to_epub.py book.pdf book.epub --skip-kepub
+python only4kobo.py book.pdf book.epub --skip-kepub
 ```
 
 ## 適用與限制

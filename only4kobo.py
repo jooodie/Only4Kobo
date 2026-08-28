@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PDF 轉 EPUB / KEPUB 轉換工具
+Only4Kobo — Kobo 電子書轉換工具
 
 支援 PDF、EPUB、Word（.doc/.docx）輸入，統一產出 .kepub.epub。
 """
@@ -385,7 +385,7 @@ def build_epub(
 ) -> None:
     """使用 ebooklib 建立 EPUB 檔案。"""
     book = epub.EpubBook()
-    book.set_identifier(f"pdf2epub-{output_path.stem}")
+    book.set_identifier(f"only4kobo-{output_path.stem}")
     book.set_title(config.title or output_path.stem)
     book.set_language(config.language)
     book.add_author(config.author)
@@ -894,7 +894,7 @@ def convert_word_to_kepub_flow(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="將 PDF/EPUB/Word 轉為 Kobo KEPUB（.kepub.epub）",
+        description="Only4Kobo：將 PDF/EPUB/Word 轉為 Kobo KEPUB（.kepub.epub）",
     )
     parser.add_argument(
         "input_file",
