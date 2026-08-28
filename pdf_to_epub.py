@@ -2,9 +2,7 @@
 """
 PDF 轉 EPUB / KEPUB 轉換工具
 
-使用 PyMuPDF 解析 PDF 文字區塊，清理頁首/頁尾/頁碼，
-依字體大小辨識標題層級，再以 ebooklib 封裝成 EPUB，
-最後透過 Calibre ebook-convert 轉成 Kobo 友善的 KEPUB。
+支援 PDF、EPUB、Word（.doc/.docx）輸入，統一產出 .kepub.epub。
 """
 
 from __future__ import annotations
@@ -438,17 +436,171 @@ def build_epub(
 
 
 # ---------------------------------------------------------------------------
-# Calibre KEPUB 轉換
+# 輸入類型判斷與 KEPUB 轉換（kepubify）
+# ---------------------------------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+WORD_EXTENSIONS = frozenset({".doc", ".docx", ".docm"})
+
+
+def is_word_document(path: Path) -> bool:
+    """判斷是否為 Word 文件。"""
+    return path.suffix.lower() in WORD_EXTENSIONS
+
+
+def is_kepub_epub(path: Path) -> bool:
+    """判斷是否為 Kobo KEPUB（副檔名為 .kepub.epub）。"""
+    return path.name.lower().endswith(".kepub.epub")
+
+
+def is_plain_epub(path: Path) -> bool:
+    """判斷是否為一般 EPUB（排除 .kepub.epub）。"""
+    return path.suffix.lower() == ".epub" and not is_kepub_epub(path)
+
+
+def classify_input_file(path: Path) -> str:
+    """
+    判斷輸入檔案類型。
+
+    回傳值：'kepub' | 'epub' | 'pdf' | 'word' | 'unknown'
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"找不到輸入檔案：{path}")
+
+    if is_kepub_epub(path):
+        return "kepub"
+    if is_plain_epub(path):
+        return "epub"
+    if path.suffix.lower() == ".pdf":
+        return "pdf"
+    if is_word_document(path):
+        return "word"
+    return "unknown"
+
+
+def resolve_intermediate_epub_path(input_path: Path, output_arg: Path | None = None) -> Path:
+    """決定中繼 EPUB 路徑（PDF / Word 轉換後的 .epub）。"""
+    if output_arg is None:
+        return input_path.with_suffix(".epub")
+
+    if is_plain_epub(output_arg):
+        return output_arg
+
+    if is_kepub_epub(output_arg):
+        base_name = output_arg.name[:-len(".kepub.epub")]
+        return output_arg.with_name(f"{base_name}.epub")
+
+    if output_arg.suffix.lower() == ".epub":
+        return output_arg
+
+    if output_arg.suffix:
+        return output_arg.with_suffix(".epub")
+
+    return output_arg / f"{input_path.stem}.epub"
+
+
+def resolve_kepub_output_path(input_epub: Path, output_arg: Path | None = None) -> Path:
+    """
+    決定 .kepub.epub 輸出路徑，確保檔名結尾為 .kepub.epub。
+
+    例如 book.epub → book.kepub.epub
+    """
+    if output_arg is None:
+        return input_epub.with_name(f"{input_epub.stem}.kepub.epub")
+
+    if is_kepub_epub(output_arg):
+        return output_arg
+
+    if output_arg.suffix.lower() == ".epub":
+        return output_arg.with_name(f"{output_arg.stem}.kepub.epub")
+
+    if output_arg.suffix:
+        return output_arg.with_name(f"{output_arg.name}.kepub.epub")
+
+    return output_arg / f"{input_epub.stem}.kepub.epub"
+
+
+def _resolve_kepubify() -> str:
+    """尋找 kepubify 可執行檔（PATH 或專案目錄）。"""
+    candidates: list[str] = []
+
+    found = shutil.which("kepubify")
+    if found:
+        candidates.append(found)
+
+    candidates.extend(
+        str(path)
+        for path in (
+            PROJECT_ROOT / "kepubify",
+            PROJECT_ROOT / "bin" / "kepubify",
+            "/opt/homebrew/bin/kepubify",
+            "/usr/local/bin/kepubify",
+        )
+    )
+
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+
+    raise FileNotFoundError(
+        "找不到 kepubify。請將 kepubify 放在專案根目錄或 bin/，"
+        "或安裝後確保可在終端執行 kepubify 指令。"
+    )
+
+
+def convert_epub_to_kepub(epub_path: Path, kepub_path: Path | None = None) -> Path:
+    """
+    使用 kepubify 將 EPUB 轉成 Kobo KEPUB（.kepub.epub）。
+    """
+    if not epub_path.is_file():
+        raise FileNotFoundError(f"找不到 EPUB 檔案：{epub_path}")
+
+    if is_kepub_epub(epub_path):
+        print("      已是 KEPUB 格式（.kepub.epub），略過轉換。")
+        return epub_path
+
+    output_path = kepub_path or resolve_kepub_output_path(epub_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    kepubify = _resolve_kepubify()
+    cmd = [kepubify, "-o", str(output_path), str(epub_path)]
+
+    print(f"      執行：{' '.join(cmd)}")
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"無法執行 kepubify：{exc}") from exc
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            f"kepubify 轉換失敗（結束碼 {result.returncode}）"
+            + (f"：\n{detail}" if detail else "")
+        )
+
+    if not output_path.is_file():
+        raise RuntimeError(f"kepubify 已結束，但找不到輸出檔：{output_path}")
+
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# Word → EPUB（Calibre，中繼步驟）
 # ---------------------------------------------------------------------------
 
 
 def _resolve_ebook_convert() -> str:
-    """尋找 Calibre 的 ebook-convert 可執行檔。"""
+    """尋找 Calibre ebook-convert（用於 Word → EPUB 中繼轉換）。"""
     found = shutil.which("ebook-convert")
     if found:
         return found
 
-    # macOS 常見安裝路徑（App bundle 未加入 PATH 時）
     mac_candidates = (
         "/Applications/calibre.app/Contents/MacOS/ebook-convert",
         "/usr/local/bin/ebook-convert",
@@ -459,54 +611,55 @@ def _resolve_ebook_convert() -> str:
             return candidate
 
     raise FileNotFoundError(
-        "找不到 ebook-convert。請安裝 Calibre，並確保 CLI 可在終端機執行 "
-        "（macOS 可將 /Applications/calibre.app/Contents/MacOS 加入 PATH）。"
+        "找不到 ebook-convert。Word 轉 EPUB 需要 Calibre，"
+        "請安裝後確保可在終端執行 ebook-convert。"
     )
 
 
-def convert_epub_to_kepub(epub_path: Path) -> Path:
-    """
-    使用 Calibre ebook-convert 將 EPUB 轉成 Kobo KEPUB。
-
-    經 Calibre 轉換管線可重整 HTML/CSS 結構，產出 XXXX.kepub.epub，
-    降低 Kobo 韌體解析不良標記而卡死的風險。
-    """
-    if not epub_path.is_file():
-        raise FileNotFoundError(f"找不到 EPUB 檔案：{epub_path}")
-
-    ebook_convert = _resolve_ebook_convert()
-    kepub_path = epub_path.with_name(f"{epub_path.stem}.kepub.epub")
-
-    cmd = [
-        ebook_convert,
-        str(epub_path),
-        str(kepub_path),
-        "--output-profile=kobo",
-        "--epub-version=3",
-        "--flow-size=0",
-        "--no-svg-cover",
-        "--pretty-print",
-    ]
-
+def _run_subprocess_cmd(cmd: list[str], tool_name: str) -> None:
+    """執行外部命令並在失敗時拋出清楚的錯誤訊息。"""
     print(f"      執行：{' '.join(cmd)}")
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"無法執行 {tool_name}：{exc}") from exc
 
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(
-            f"ebook-convert 轉換失敗（結束碼 {result.returncode}）"
+            f"{tool_name} 轉換失敗（結束碼 {result.returncode}）"
             + (f"：\n{detail}" if detail else "")
         )
 
-    if not kepub_path.is_file():
-        raise RuntimeError(f"ebook-convert 已結束，但找不到輸出檔：{kepub_path}")
 
-    return kepub_path
+def convert_word_to_epub(word_path: Path, epub_path: Path, config: ConversionConfig) -> None:
+    """使用 Calibre 將 Word（.doc/.docx）轉為 EPUB。"""
+    if not word_path.is_file():
+        raise FileNotFoundError(f"找不到 Word 檔案：{word_path}")
+
+    ebook_convert = _resolve_ebook_convert()
+    epub_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        ebook_convert,
+        str(word_path),
+        str(epub_path),
+        f"--language={config.language}",
+    ]
+    if config.title:
+        cmd.append(f"--title={config.title}")
+    if config.author and config.author != "Unknown":
+        cmd.append(f"--authors={config.author}")
+
+    _run_subprocess_cmd(cmd, "ebook-convert")
+
+    if not epub_path.is_file():
+        raise RuntimeError(f"ebook-convert 已結束，但找不到輸出檔：{epub_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +765,26 @@ def copy_kepub_to_author_folder(kepub_path: Path, base_dir: Path | None = None) 
     return target_file
 
 
+def finalize_kepub_from_epub(
+    epub_path: Path,
+    output_path: Path | None = None,
+    *,
+    step_offset: int = 1,
+    total_steps: int = 2,
+) -> None:
+    """共用結尾：kepubify 轉換並歸檔至作者資料夾。"""
+    kepub_out = resolve_kepub_output_path(epub_path, output_path)
+
+    print(f"[{step_offset}/{total_steps}] 以 kepubify 轉成 KEPUB")
+    kepub_path = convert_epub_to_kepub(epub_path, kepub_out)
+    print(f"      已產生：{kepub_path}")
+
+    print(f"[{step_offset + 1}/{total_steps}] 依作者自動歸檔 KEPUB")
+    copied_path = copy_kepub_to_author_folder(kepub_path)
+    print(f"      已複製至：{copied_path}")
+    print("轉換完成。")
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -664,25 +837,77 @@ def convert_pdf_to_epub(
             print("轉換完成（已略過 KEPUB）。")
             return
 
-        print(f"[5/{total_steps}] 以 Calibre 轉成 KEPUB")
-        kepub_path = convert_epub_to_kepub(epub_path)
-        print(f"      已產生：{kepub_path}")
-
-        print(f"[6/{total_steps}] 依作者自動歸檔 KEPUB")
-        copied_path = copy_kepub_to_author_folder(kepub_path)
-        print(f"      已複製至：{copied_path}")
-        print("轉換完成。")
+        finalize_kepub_from_epub(epub_path, epub_path.with_name(f"{epub_path.stem}.kepub.epub"), step_offset=5, total_steps=6)
     finally:
         if cover_path.is_file():
             cover_path.unlink()
 
 
+def convert_epub_to_kepub_flow(
+    epub_path: Path,
+    output_path: Path | None = None,
+    *,
+    skip_kepub: bool = False,
+) -> None:
+    """EPUB 輸入流程：跳過 PDF 解析，直接 kepubify 並歸檔。"""
+    if skip_kepub:
+        print("輸入已是 EPUB，且已指定 --skip-kepub，無需處理。")
+        return
+
+    kepub_out = resolve_kepub_output_path(epub_path, output_path)
+    total_steps = 2
+
+    print(f"[1/{total_steps}] 以 kepubify 轉成 KEPUB：{epub_path}")
+    finalize_kepub_from_epub(epub_path, kepub_out, step_offset=1, total_steps=total_steps)
+
+
+def convert_word_to_kepub_flow(
+    word_path: Path,
+    output_path: Path | None = None,
+    config: ConversionConfig | None = None,
+    *,
+    skip_kepub: bool = False,
+) -> None:
+    """Word 輸入流程：Calibre 轉 EPUB → kepubify → 作者歸檔。"""
+    config = config or ConversionConfig()
+    if not config.title:
+        config.title = word_path.stem
+
+    epub_path = resolve_intermediate_epub_path(word_path, output_path)
+    total_steps = 1 if skip_kepub else 3
+
+    print(f"[1/{total_steps}] 將 Word 轉為 EPUB：{word_path}")
+    convert_word_to_epub(word_path, epub_path, config)
+    print(f"      已產生：{epub_path}")
+
+    if skip_kepub:
+        print("轉換完成（已略過 KEPUB）。")
+        return
+
+    finalize_kepub_from_epub(
+        epub_path,
+        resolve_kepub_output_path(epub_path, output_path),
+        step_offset=2,
+        total_steps=total_steps,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="將 PDF 轉為 EPUB，並以 Calibre 再轉成 Kobo KEPUB",
+        description="將 PDF/EPUB/Word 轉為 Kobo KEPUB（.kepub.epub）",
     )
-    parser.add_argument("input_pdf", type=Path, help="輸入 PDF 檔案路徑")
-    parser.add_argument("output_epub", type=Path, help="輸出 EPUB 檔案路徑")
+    parser.add_argument(
+        "input_file",
+        type=Path,
+        help="輸入檔案路徑（支援 .pdf、.epub、.doc/.docx；.kepub.epub 會略過）",
+    )
+    parser.add_argument(
+        "output_epub",
+        type=Path,
+        nargs="?",
+        default=None,
+        help="輸出路徑（PDF/Word：EPUB；EPUB：KEPUB；可省略）",
+    )
     parser.add_argument("--title", default="", help="電子書標題（預設使用 PDF 檔名）")
     parser.add_argument("--author", default="Unknown", help="作者名稱")
     parser.add_argument("--language", default="zh", help="語言代碼，例如 zh、en")
@@ -701,27 +926,64 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-kepub",
         action="store_true",
-        help="只輸出 EPUB，不呼叫 ebook-convert 轉成 KEPUB",
+        help="只輸出 EPUB，不轉成 KEPUB（PDF / Word 輸入）",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    input_path = args.input_file.resolve()
+    file_kind = classify_input_file(input_path)
 
-    config = ConversionConfig(
-        title=args.title,
-        author=args.author,
-        language=args.language,
-        header_ratio=args.header_ratio,
-        footer_ratio=args.footer_ratio,
-    )
+    if file_kind == "kepub":
+        print(f"已是 KEPUB 格式（.kepub.epub），略過轉換：{input_path}")
+        return
 
-    convert_pdf_to_epub(
-        args.input_pdf,
-        args.output_epub,
-        config,
-        skip_kepub=args.skip_kepub,
+    if file_kind == "epub":
+        convert_epub_to_kepub_flow(
+            input_path,
+            args.output_epub,
+            skip_kepub=args.skip_kepub,
+        )
+        return
+
+    if file_kind == "pdf":
+        output_epub = resolve_intermediate_epub_path(input_path, args.output_epub)
+        config = ConversionConfig(
+            title=args.title,
+            author=args.author,
+            language=args.language,
+            header_ratio=args.header_ratio,
+            footer_ratio=args.footer_ratio,
+        )
+        convert_pdf_to_epub(
+            input_path,
+            output_epub,
+            config,
+            skip_kepub=args.skip_kepub,
+        )
+        return
+
+    if file_kind == "word":
+        config = ConversionConfig(
+            title=args.title,
+            author=args.author,
+            language=args.language,
+            header_ratio=args.header_ratio,
+            footer_ratio=args.footer_ratio,
+        )
+        convert_word_to_kepub_flow(
+            input_path,
+            args.output_epub,
+            config,
+            skip_kepub=args.skip_kepub,
+        )
+        return
+
+    raise ValueError(
+        f"不支援的輸入檔案類型：{input_path.suffix}。"
+        "請提供 .pdf、.epub、.doc/.docx 或已是 .kepub.epub 的檔案。"
     )
 
 
